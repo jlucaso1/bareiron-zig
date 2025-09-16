@@ -227,7 +227,7 @@ typedef struct {
   // 0x02 - has not spawned yet
   // 0x04 - sneaking
   // 0x08 - sprinting
-  // 0x10 - eating, makes flagval_16 act as eating timer
+  // 0x10 - eating, uses flagval_16 as timer and flagval_8 as hotbar slot
   // 0x20 - client loading, uses flagval_16 as fallback timer
   // 0x40 - movement update cooldown
   uint8_t flags;

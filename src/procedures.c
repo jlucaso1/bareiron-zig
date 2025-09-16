@@ -964,8 +964,10 @@ uint8_t handlePlayerEating (PlayerData *player, uint8_t just_check) {
   // Exit early if player is unable to eat
   if (player->hunger >= 20) return false;
 
-  uint16_t *held_item = &player->inventory_items[player->hotbar];
-  uint8_t *held_count = &player->inventory_count[player->hotbar];
+  uint8_t eating_slot = just_check ? player->hotbar : player->flagval_8;
+
+  uint16_t *held_item = &player->inventory_items[eating_slot];
+  uint8_t *held_count = &player->inventory_count[eating_slot];
 
   // Exit early if player isn't holding anything
   if (*held_item == 0 || *held_count == 0) return false;
@@ -1005,7 +1007,7 @@ uint8_t handlePlayerEating (PlayerData *player, uint8_t just_check) {
   sc_setHealth(player->client_fd, player->health, player->hunger, player->saturation);
   sc_setContainerSlot(
     player->client_fd, 0,
-    serverSlotToClientSlot(0, player->hotbar),
+    serverSlotToClientSlot(0, eating_slot),
     *held_count, *held_item
   );
 
@@ -1142,6 +1144,7 @@ void handlePlayerAction (PlayerData *player, int action, short x, short y, short
   if (action == 5) {
     // Reset eating timer and clear eating flag
     player->flagval_16 = 0;
+    player->flagval_8 = 0;
     player->flags &= ~0x10;
   }
 
@@ -1289,6 +1292,7 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
   } else if (handlePlayerEating(player, true)) {
     // Reset eating timer and set eating flag
     player->flagval_16 = 0;
+    player->flagval_8 = player->hotbar;
     player->flags |= 0x10;
   } else if (getItemDefensePoints(*item) != 0) {
     // For some reason, this action is sent twice when looking at a block
@@ -1616,6 +1620,7 @@ void handleServerTick (int64_t time_since_last_tick) {
         handlePlayerEating(&player_data[i], false);
         player->flags &= ~0x10;
         player->flagval_16 = 0;
+        player->flagval_8 = 0;
       } else player->flagval_16 ++;
     }
     // Reset movement update cooldown if not broadcasting every update

@@ -501,6 +501,10 @@ int cs_playerAction (int client_fd) {
   PlayerData *player;
   if (getPlayerData(client_fd, &player)) return 1;
 
+  if (action == 5) {
+    player->flagval_8 = 0;
+  }
+
   handlePlayerAction(player, action, x, y, z);
 
   return 0;
