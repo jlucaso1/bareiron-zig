@@ -1,5 +1,8 @@
 const std = @import("std");
 const c = @import("c_api.zig").c;
+const net = std.net;
+const posix = std.posix;
+
 comptime {
     _ = @import("varnum.zig");
 }
@@ -22,22 +25,17 @@ comptime {
     _ = @import("worldgen.zig");
 }
 const dispatch = @import("dispatch.zig");
+const connections = @import("connections.zig");
 const state_mod = @import("state.zig");
 const builtin = @import("builtin");
+const windows = std.os.windows;
 
 const MAX_PLAYERS = c.MAX_PLAYERS;
 const PORT: u16 = @intCast(c.PORT);
 const TIME_BETWEEN_TICKS: i64 = @intCast(c.TIME_BETWEEN_TICKS);
 
-const is_windows = builtin.target.os.tag == .windows;
-const SocketFD = if (is_windows) c.SOCKET else std.posix.fd_t;
-const INVALID_FD: SocketFD = if (is_windows) c.INVALID_SOCKET else @as(std.posix.fd_t, -1);
-var client_fds: [MAX_PLAYERS]SocketFD = undefined;
+pub const client_streams = &connections.client_streams;
 var g_state: state_mod.ServerState = undefined;
-
-// Winsock's FIONBIO (_IOW) expands to 0x8004667E as an unsigned value.
-// ioctlsocket expects a signed long; use bitcast to preserve bits.
-const FIONBIO: c_long = if (is_windows) @bitCast(@as(c_uint, 0x8004667E)) else 0;
 
 const is_esp = @import("builtin").target.os.tag == .freestanding;
 
@@ -55,63 +53,25 @@ fn task_yield() void {
 }
 
 pub fn main() !void {
-    if (is_windows) {
-        var wsa_data: c.WSADATA = undefined;
-        if (c.WSAStartup(c.MAKEWORD(2, 2), &wsa_data) != 0) {
-            std.log.err("WSAStartup failed", .{});
-            return error.WinsockInitFailed;
-        }
-        defer _ = c.WSACleanup();
-    }
-
     // Initialize server state context
     g_state = state_mod.ServerState.init();
     _ = c.initSerializer(@ptrCast(&g_state.context));
 
-    for (&client_fds) |*fd| fd.* = INVALID_FD;
-
-    var server_fd: SocketFD = undefined;
-    // Create TCP server socket (IPv4)
-    server_fd = c.socket(c.AF_INET, c.SOCK_STREAM, 0);
-    if (server_fd == INVALID_FD) return error.SocketCreateFailed;
-    defer {
-        if (is_windows) {
-            _ = c.closesocket(server_fd);
-        } else {
-            _ = c.close(server_fd);
-        }
-    }
-
-    var opt: c_int = 1;
-    _ = c.setsockopt(server_fd, c.SOL_SOCKET, c.SO_REUSEADDR, @ptrCast(&opt), @sizeOf(c_int));
-    if (@import("builtin").target.os.tag == .macos) {
-        // Prevent SIGPIPE on send
-        _ = c.setsockopt(server_fd, c.SOL_SOCKET, c.SO_NOSIGPIPE, @ptrCast(&opt), @sizeOf(c_int));
-    }
-
-    var addr: c.sockaddr_in = std.mem.zeroes(c.sockaddr_in);
-    addr.sin_family = c.AF_INET;
-    addr.sin_port = std.mem.nativeToBig(u16, PORT);
-    if (is_windows) {
-        // Windows IN_ADDR layout differs from POSIX
-        addr.sin_addr.S_un.S_addr = std.mem.nativeToBig(u32, c.INADDR_ANY);
-    } else {
-        addr.sin_addr.s_addr = std.mem.nativeToBig(u32, c.INADDR_ANY);
-    }
-    if (c.bind(server_fd, @ptrCast(&addr), @intCast(@sizeOf(c.sockaddr_in))) < 0) {
-        std.log.err("bind() failed", .{});
-        return error.BindFailed;
-    }
-    if (c.listen(server_fd, 5) < 0) {
-        std.log.err("listen() failed", .{});
-        return error.ListenFailed;
-    }
-    if (is_windows) {
+    var address = try net.Address.parseIp("0.0.0.0", PORT);
+    var server = try address.listen(.{ .reuse_address = true });
+    defer server.deinit();
+    // Non-blocking server socket
+    if (comptime builtin.target.os.tag == .windows) {
         var mode: c_ulong = 1;
-        _ = c.ioctlsocket(server_fd, FIONBIO, &mode);
+        const sock_val: usize = @intFromPtr(server.stream.handle);
+        const sock: c.SOCKET = @intCast(sock_val);
+        const FIONBIO_UL: c_ulong = 0x8004667E; // avoid cimport _IOW macro
+        const FIONBIO_L: c_long = @bitCast(FIONBIO_UL);
+        _ = c.ioctlsocket(sock, FIONBIO_L, &mode);
     } else {
-        const flags: c_int = c.fcntl(server_fd, c.F_GETFL, @as(c_int, 0));
-        _ = c.fcntl(server_fd, c.F_SETFL, flags | @as(c_int, c.O_NONBLOCK));
+        const cur_flags = try posix.fcntl(server.stream.handle, posix.F.GETFL, 0);
+        const nonblock_mask: c_int = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
+        _ = try posix.fcntl(server.stream.handle, posix.F.SETFL, cur_flags | nonblock_mask);
     }
     std.log.info("Server listening on port {}", .{PORT});
 
@@ -123,112 +83,49 @@ pub fn main() !void {
         var time_to_next_tick: i64 = TIME_BETWEEN_TICKS - elapsed;
         if (time_to_next_tick < 0) time_to_next_tick = 0;
 
-        if (is_windows) {
-            var pfds: [MAX_PLAYERS + 1]c.WSAPOLLFD = undefined;
-            var idxmap: [MAX_PLAYERS + 1]isize = undefined;
-            var count: usize = 0;
-            pfds[count] = .{ .fd = server_fd, .events = c.POLLRDNORM, .revents = 0 };
-            idxmap[count] = -1; // server marker
-            count += 1;
+        var pfds: [MAX_PLAYERS + 1]posix.pollfd = undefined;
+        var idxmap: [MAX_PLAYERS + 1]isize = undefined;
+        var count: usize = 0;
 
-            for (0..MAX_PLAYERS) |i| {
-                const fd = client_fds[i];
-                if (fd == INVALID_FD) continue;
-                pfds[count] = .{ .fd = fd, .events = c.POLLRDNORM, .revents = 0 };
+        pfds[count] = .{ .fd = server.stream.handle, .events = posix.POLL.IN, .revents = 0 };
+        idxmap[count] = -1;
+        count += 1;
+
+        for (client_streams.*, 0..) |maybe_stream, i| {
+            if (maybe_stream) |stream| {
+                pfds[count] = .{ .fd = stream.handle, .events = posix.POLL.IN, .revents = 0 };
                 idxmap[count] = @intCast(i);
                 count += 1;
             }
+        }
 
-            const timeout_ms: c_int = @intCast(@divTrunc(time_to_next_tick, 1000));
-            const rc = c.WSAPoll(&pfds[0], @intCast(count), timeout_ms);
-            if (rc < 0) {
-                std.log.warn("WSAPoll() returned an error, continuing.", .{});
-            }
+        const timeout_ms: c_int = @intCast(@divTrunc(time_to_next_tick, 1000));
+        _ = posix.poll(pfds[0..count], timeout_ms) catch |err| {
+            std.log.warn("poll() error: {s}", .{@errorName(err)});
+        };
 
-            if (pfds[0].revents & c.POLLRDNORM != 0) {
-                acceptNewConnection(server_fd) catch |err| {
-                    std.log.warn("Failed to accept new connection: {s}", .{@errorName(err)});
-                };
-            }
-
-            var i: usize = 1;
-            while (i < count) : (i += 1) {
-                const ev = pfds[i].revents;
-                if (ev == 0) continue;
-                const slot = idxmap[i];
-                if (slot < 0) continue;
-                const fd = client_fds[@intCast(slot)];
-                if (ev & c.POLLRDNORM != 0) {
-                    var peek_buf: [1]u8 = undefined;
-                    const peek_res = c.recv(fd, &peek_buf, 1, c.MSG_PEEK);
-                    if (peek_res > 0) {
-                        processClientPacket(fd);
-                    } else if (peek_res == 0) {
-                        disconnectClient(@intCast(slot));
-                    } else {
-                        const err = c.get_errno();
-                        if (err != c.EAGAIN and err != c.EWOULDBLOCK) {
-                            disconnectClient(@intCast(slot));
-                        }
-                    }
+        if (pfds[0].revents & posix.POLL.IN != 0) {
+            acceptNewConnection(&server) catch |err| {
+                if (err != error.WouldBlock) {
+                    std.log.warn("accept failed: {s}", .{@errorName(err)});
                 }
-            }
-        } else {
-            var pfds: [MAX_PLAYERS + 1]c.pollfd = undefined;
-            var idxmap: [MAX_PLAYERS + 1]isize = undefined;
-            var count: usize = 0;
-            pfds[count] = .{ .fd = server_fd, .events = c.POLLIN, .revents = 0 };
-            idxmap[count] = -1; // server marker
-            count += 1;
+            };
+        }
 
-            for (0..MAX_PLAYERS) |i| {
-                const fd = client_fds[i];
-                if (fd == INVALID_FD) continue;
-                pfds[count] = .{ .fd = fd, .events = c.POLLIN, .revents = 0 };
-                idxmap[count] = @intCast(i);
-                count += 1;
+        var i: usize = 1;
+        while (i < count) : (i += 1) {
+            const ev = pfds[i].revents;
+            if (ev == 0) continue;
+            const slot = idxmap[i];
+            if (slot < 0) continue;
+            const idx: usize = @intCast(slot);
+            if (ev & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+                disconnectClient(idx);
+                continue;
             }
-
-            const timeout_ms: i32 = @intCast(@divTrunc(time_to_next_tick, 1000));
-            const rc = c.poll(&pfds[0], @intCast(count), timeout_ms);
-            if (rc < 0) {
-                std.log.warn("poll() returned an error, continuing.", .{});
-            }
-
-            if (pfds[0].revents & c.POLLIN != 0) {
-                acceptNewConnection(server_fd) catch |err| {
-                    std.log.warn("Failed to accept new connection: {s}", .{@errorName(err)});
-                };
-            }
-
-            var i: usize = 1;
-            while (i < count) : (i += 1) {
-                const ev = pfds[i].revents;
-                if (ev == 0) continue;
-                const slot = idxmap[i];
-                if (slot < 0) continue;
-                const fd = client_fds[@intCast(slot)];
-                if (ev & (c.POLLHUP | c.POLLERR | c.POLLNVAL) != 0) {
-                    disconnectClient(@intCast(slot));
-                    continue;
-                }
-                if (ev & c.POLLIN != 0) {
-                    var peek_buf: [1]u8 = undefined;
-                    const peek_res = c.recv(fd, &peek_buf, 1, c.MSG_PEEK);
-                    if (peek_res > 0) {
-                        processClientPacket(fd);
-                    } else if (peek_res == 0) {
-                        // orderly shutdown by peer
-                        disconnectClient(@intCast(slot));
-                    } else {
-                        // peek_res < 0: on non-blocking sockets EAGAIN/EWOULDBLOCK is normal
-                        const err = c.get_errno();
-                        if (err == c.EAGAIN or err == c.EWOULDBLOCK) {
-                            // no data available; do nothing
-                        } else {
-                            disconnectClient(@intCast(slot));
-                        }
-                    }
+            if (ev & posix.POLL.IN != 0) {
+                if (client_streams.*[idx]) |stream| {
+                    processClientPacket(stream);
                 }
             }
         }
@@ -241,63 +138,86 @@ pub fn main() !void {
     }
 }
 
-fn acceptNewConnection(server_fd: SocketFD) !void {
+fn acceptNewConnection(server: *net.Server) !void {
     var free_slot: ?usize = null;
-    for (0..MAX_PLAYERS) |i| {
-        if (client_fds[i] == INVALID_FD) {
+    for (client_streams.*, 0..) |maybe_stream, i| {
+        if (maybe_stream == null) {
             free_slot = i;
             break;
         }
     }
-    var addr: c.sockaddr_in = undefined;
-    var addr_len: c.socklen_t = @intCast(@sizeOf(c.sockaddr_in));
-    const new_fd = c.accept(server_fd, @ptrCast(&addr), &addr_len);
-    if (new_fd == INVALID_FD) return error.AcceptFailed;
-
+    const conn = server.accept() catch |err| {
+        if (err == error.WouldBlock) return err; // non-fatal
+        return err;
+    };
     if (free_slot) |i| {
-        if (is_windows) {
+        if (comptime builtin.target.os.tag == .windows) {
             var mode: c_ulong = 1;
-            _ = c.ioctlsocket(new_fd, FIONBIO, &mode);
+            const sock_val: usize = @intFromPtr(conn.stream.handle);
+            const sock: c.SOCKET = @intCast(sock_val);
+            const FIONBIO_UL: c_ulong = 0x8004667E;
+            const FIONBIO_L: c_long = @bitCast(FIONBIO_UL);
+            _ = c.ioctlsocket(sock, FIONBIO_L, &mode);
         } else {
-            const flags2: c_int = c.fcntl(new_fd, c.F_GETFL, @as(c_int, 0));
-            _ = c.fcntl(new_fd, c.F_SETFL, flags2 | @as(c_int, c.O_NONBLOCK));
+            const cur = try posix.fcntl(conn.stream.handle, posix.F.GETFL, 0);
+            const nb_mask: c_int = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
+            _ = try posix.fcntl(conn.stream.handle, posix.F.SETFL, cur | nb_mask);
         }
-        if (@import("builtin").target.os.tag == .macos) {
-            var one: c_int = 1;
-            _ = c.setsockopt(new_fd, c.SOL_SOCKET, c.SO_NOSIGPIPE, @ptrCast(&one), @sizeOf(c_int));
-        }
-        client_fds[i] = new_fd;
-        std.log.info("Accepted new client in slot {d} (fd: {d})", .{ i, new_fd });
-        c.setClientState(@ptrCast(&g_state.context), @intCast(new_fd), c.STATE_NONE);
+        client_streams.*[i] = conn.stream;
+        const fd_ci: c_int = if (comptime builtin.target.os.tag == .windows)
+            @intCast(@intFromPtr(conn.stream.handle))
+        else
+            @intCast(conn.stream.handle);
+        std.log.info("Accepted new client in slot {d} (fd: {d})", .{ i, fd_ci });
+        if (comptime builtin.target.os.tag == .windows) connections.client_ids[i] = fd_ci;
+        c.setClientState(@ptrCast(&g_state.context), fd_ci, c.STATE_NONE);
     } else {
-        if (is_windows) {
-            _ = c.closesocket(new_fd);
-        } else {
-            _ = c.close(new_fd);
-        }
+        conn.stream.close();
     }
 }
 
 fn disconnectClient(slot: usize) void {
-    const fd = client_fds[slot];
-    if (fd == INVALID_FD) return;
-    std.log.info("Client in slot {d} (fd: {d}) disconnected.", .{ slot, fd });
-    c.setClientState(@ptrCast(&g_state.context), @intCast(fd), c.STATE_NONE);
-    c.handlePlayerDisconnect(@ptrCast(&g_state.context), @intCast(fd));
-    if (is_windows) {
-        _ = c.closesocket(fd);
-    } else {
-        _ = c.close(fd);
+    if (client_streams.*[slot]) |*stream| {
+        const fd_ci: c_int = if (comptime builtin.target.os.tag == .windows)
+            @intCast(@intFromPtr(stream.handle))
+        else
+            @intCast(stream.handle);
+        std.log.info("Client in slot {d} (fd: {d}) disconnected.", .{ slot, fd_ci });
+        c.setClientState(@ptrCast(&g_state.context), fd_ci, c.STATE_NONE);
+        c.handlePlayerDisconnect(@ptrCast(&g_state.context), fd_ci);
+        stream.close();
+        client_streams.*[slot] = null;
+        if (comptime builtin.target.os.tag == .windows) connections.client_ids[slot] = 0;
+        if (g_state.context.client_count > 0) g_state.context.client_count -= 1;
     }
-    client_fds[slot] = INVALID_FD;
-    if (g_state.context.client_count > 0) g_state.context.client_count -= 1;
 }
 
-fn processClientPacket(fd: SocketFD) void {
-    const length = c.readVarInt(@ptrCast(&g_state.context), @intCast(fd));
+fn processClientPacket(stream: net.Stream) void {
+    const fd: c_int = if (comptime builtin.target.os.tag == .windows)
+        @intCast(@intFromPtr(stream.handle))
+    else
+        @intCast(stream.handle);
+    const length = c.readVarInt(@ptrCast(&g_state.context), fd);
     if (length == c.VARNUM_ERROR) return;
-    const packet_id = c.readVarInt(@ptrCast(&g_state.context), @intCast(fd));
+    if (length < 0 or @as(u32, @bitCast(length)) > g_state.context.recv_buffer.len) {
+        std.log.warn("Bad packet length {d} from fd {d}; disconnecting.", .{ length, fd });
+        if (comptime builtin.target.os.tag == .windows) {
+            for (connections.client_ids, 0..) |cid, i| {
+                if (cid == fd) {
+                    disconnectClient(i);
+                    break;
+                }
+            }
+        } else {
+            if (connections.findSlotByFd(@intCast(fd))) |slot| disconnectClient(slot);
+        }
+        return;
+    }
+    const packet_id = c.readVarInt(@ptrCast(&g_state.context), fd);
     if (packet_id == c.VARNUM_ERROR) return;
-    const st = c.getClientState(@ptrCast(&g_state.context), @intCast(fd));
-    dispatch.handlePacket(@ptrCast(&g_state.context), @intCast(fd), length - c.sizeVarInt(@intCast(packet_id)), @intCast(packet_id), st);
+    const st = c.getClientState(@ptrCast(&g_state.context), fd);
+    const pid_bits: u32 = @as(u32, @bitCast(packet_id));
+    const header_size: c_int = c.sizeVarInt(pid_bits);
+    const payload_len: c_int = length - header_size;
+    dispatch.handlePacket(@ptrCast(&g_state.context), fd, payload_len, @intCast(packet_id), st);
 }

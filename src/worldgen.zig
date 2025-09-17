@@ -83,8 +83,8 @@ fn getFeatureFromAnchor(ctx: *c.ServerContext, anchor: c.ChunkAnchor) c.ChunkFea
         feature.z = std.math.lossyCast(c_short, @as(c_int, @intCast(feature.z)) + addz);
         feature.y = getHeightAtFromHash(
             ctx,
-            std.math.mod(c_int, feature.x, c.CHUNK_SIZE) catch unreachable,
-            std.math.mod(c_int, feature.z, c.CHUNK_SIZE) catch unreachable,
+            @mod(@as(c_int, feature.x), c.CHUNK_SIZE),
+            @mod(@as(c_int, feature.z), c.CHUNK_SIZE),
             anchor.x,
             anchor.z,
             anchor.hash,
@@ -219,12 +219,12 @@ pub export fn getChunkBiome(ctx: *c.ServerContext, x_in: c_short, z_in: c_short)
     const x: c_int = x_in + c.BIOME_RADIUS;
     const z: c_int = z_in + c.BIOME_RADIUS;
 
-    const dx: i8 = @intCast(c.BIOME_RADIUS - (std.math.mod(c_int, x, c.BIOME_SIZE) catch unreachable));
-    const dz: i8 = @intCast(c.BIOME_RADIUS - (std.math.mod(c_int, z, c.BIOME_SIZE) catch unreachable));
+    const dx: i8 = @intCast(c.BIOME_RADIUS - @mod(x, c.BIOME_SIZE));
+    const dz: i8 = @intCast(c.BIOME_RADIUS - @mod(z, c.BIOME_SIZE));
     if (@as(c_int, dx) * dx + @as(c_int, dz) * dz > c.BIOME_RADIUS * c.BIOME_RADIUS) return c.W_beach;
 
-    const biome_x: c_int = std.math.divFloor(c_int, x, c.BIOME_SIZE) catch unreachable;
-    const biome_z: c_int = std.math.divFloor(c_int, z, c.BIOME_SIZE) catch unreachable;
+    const biome_x: c_int = @divFloor(x, c.BIOME_SIZE);
+    const biome_z: c_int = @divFloor(z, c.BIOME_SIZE);
     const index: c_int = (biome_x & 3) + ((biome_z * 4) & 15);
     const shift: u5 = @intCast((index * 2) & 31);
     return @intCast((ctx.world_seed >> shift) & 3);
@@ -254,10 +254,10 @@ pub export fn getHeightAtFromHash(
 }
 
 pub export fn getHeightAt(ctx: *c.ServerContext, x: c_int, z: c_int) u8 {
-    const _x = std.math.divFloor(c_int, x, c.CHUNK_SIZE) catch unreachable;
-    const _z = std.math.divFloor(c_int, z, c.CHUNK_SIZE) catch unreachable;
-    const rx = std.math.mod(c_int, x, c.CHUNK_SIZE) catch unreachable;
-    const rz = std.math.mod(c_int, z, c.CHUNK_SIZE) catch unreachable;
+    const _x = @divFloor(x, c.CHUNK_SIZE);
+    const _z = @divFloor(z, c.CHUNK_SIZE);
+    const rx = @mod(x, c.CHUNK_SIZE);
+    const rz = @mod(z, c.CHUNK_SIZE);
     const chunk_hash = getChunkHash(ctx, std.math.lossyCast(c_short, _x), std.math.lossyCast(c_short, _z));
     const biome = getChunkBiome(ctx, std.math.lossyCast(c_short, _x), std.math.lossyCast(c_short, _z));
     return getHeightAtFromHash(ctx, rx, rz, _x, _z, chunk_hash, biome);
@@ -265,8 +265,8 @@ pub export fn getHeightAt(ctx: *c.ServerContext, x: c_int, z: c_int) u8 {
 
 pub export fn getTerrainAt(ctx: *c.ServerContext, x: c_int, y: c_int, z: c_int, anchor: c.ChunkAnchor) u8 {
     if (y > 80) return c.B_air;
-    const rx = std.math.mod(c_int, x, c.CHUNK_SIZE) catch unreachable;
-    const rz = std.math.mod(c_int, z, c.CHUNK_SIZE) catch unreachable;
+    const rx = @mod(x, c.CHUNK_SIZE);
+    const rz = @mod(z, c.CHUNK_SIZE);
     const feature = getFeatureFromAnchor(ctx, anchor);
     const height = getHeightAtFromHash(ctx, rx, rz, anchor.x, anchor.z, anchor.hash, anchor.biome);
     return getTerrainAtFromCache(x, y, z, rx, rz, anchor, feature, height);
@@ -279,8 +279,8 @@ pub export fn getBlockAt(ctx: *c.ServerContext, x: c_int, y: c_int, z: c_int) u8
     const zs: c_short = std.math.lossyCast(c_short, z);
     const block_change = c.getBlockChange(ctx, xs, ys, zs);
     if (block_change != 0xFF) return block_change;
-    const anchor_x: c_short = std.math.lossyCast(c_short, std.math.divFloor(c_int, x, c.CHUNK_SIZE) catch unreachable);
-    const anchor_z: c_short = std.math.lossyCast(c_short, std.math.divFloor(c_int, z, c.CHUNK_SIZE) catch unreachable);
+    const anchor_x: c_short = std.math.lossyCast(c_short, @divFloor(x, c.CHUNK_SIZE));
+    const anchor_z: c_short = std.math.lossyCast(c_short, @divFloor(z, c.CHUNK_SIZE));
     const anchor = c.ChunkAnchor{
         .x = anchor_x,
         .z = anchor_z,

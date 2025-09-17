@@ -154,7 +154,9 @@ pub fn handlePacket(ctx: *c.ServerContext, client_fd: c_int, length: c_int, pack
             if (c.getClientState(ctx, client_fd) == c.STATE_PLAY) _ = c.cs_closeContainer(ctx, client_fd);
         },
         0x1B => {
-            if (c.getClientState(ctx, client_fd) == c.STATE_PLAY) _ = c.recv_all(client_fd, &ctx.recv_buffer, @intCast(length), 0);
+            if (c.getClientState(ctx, client_fd) == c.STATE_PLAY) {
+                if (length > 0) _ = c.recv_all(client_fd, &ctx.recv_buffer, @intCast(length), 0);
+            }
         },
         0x19 => {
             if (c.getClientState(ctx, client_fd) == c.STATE_PLAY) _ = c.cs_interact(ctx, client_fd);
@@ -366,7 +368,7 @@ pub fn handlePacket(ctx: *c.ServerContext, client_fd: c_int, length: c_int, pack
             if (comptime @hasDecl(c, "DEV_LOG_UNKNOWN_PACKETS")) {
                 std.log.warn("Unknown packet: 0x{X:0>2}, length: {d}, state: {d}", .{ packet_id, length, c.getClientState(ctx, client_fd) });
             }
-            _ = c.recv_all(client_fd, &ctx.recv_buffer, @intCast(length), 0);
+            if (length > 0) _ = c.recv_all(client_fd, &ctx.recv_buffer, @intCast(length), 0);
         },
     }
 
