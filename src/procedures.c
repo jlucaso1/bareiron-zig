@@ -179,10 +179,13 @@ void handlePlayerJoin (ServerContext *ctx, PlayerData* player) {
 
   // Inform other clients (and the joining client) of the player's name and entity
   for (int i = 0; i < MAX_PLAYERS; i ++) {
-  sc_systemChat(ctx->player_data[i].client_fd, (char *)ctx->recv_buffer, 16 + player_name_len);
-    sc_playerInfoUpdateAddPlayer(ctx->player_data[i].client_fd, *player);
-    if (ctx->player_data[i].client_fd != player->client_fd) {
-      sc_spawnEntityPlayer(ctx->player_data[i].client_fd, *player);
+    int fd = ctx->player_data[i].client_fd;
+    if (fd == -1) continue;           // skip offline
+    if (ctx->player_data[i].flags & 0x20) continue; // skip loading
+    sc_systemChat(fd, (char *)ctx->recv_buffer, 16 + player_name_len);
+    sc_playerInfoUpdateAddPlayer(fd, *player);
+    if (fd != player->client_fd) {
+      sc_spawnEntityPlayer(fd, *player);
     }
   }
 
@@ -307,6 +310,8 @@ void spawnPlayer (ServerContext *ctx, PlayerData *player) {
   float spawn_x = 8.5f, spawn_y = 80.0f, spawn_z = 8.5f;
   float spawn_yaw = 0.0f, spawn_pitch = 0.0f;
 
+  printf("[spawn] begin for fd=%d\n", player->client_fd);
+
   if (player->flags & 0x02) { // Is this a new player?
     // Determine spawning Y coordinate based on terrain height
     spawn_y = getHeightAt(ctx, 8, 8) + 1;
@@ -322,11 +327,13 @@ void spawnPlayer (ServerContext *ctx, PlayerData *player) {
   }
 
   // Teleport player to spawn coordinates (first pass)
+  printf("[spawn] sync pos 1\n");
   sc_synchronizePlayerPosition(player->client_fd, spawn_x, spawn_y, spawn_z, spawn_yaw, spawn_pitch);
 
   task_yield(); // Check task timer between packets
 
   // Sync client inventory and hotbar
+  printf("[spawn] sync inventory\n");
   for (uint8_t i = 0; i < 41; i ++) {
     sc_setContainerSlot(player->client_fd, 0, serverSlotToClientSlot(0, i), player->inventory_count[i], player->inventory_items[i]);
   }
@@ -347,6 +354,7 @@ void spawnPlayer (ServerContext *ctx, PlayerData *player) {
   short _x = div_floor(player->x, 16), _z = div_floor(player->z, 16);
 
   // Indicate that we're about to send chunk data
+  printf("[spawn] preload chunks at (%d,%d)\n", _x, _z);
   sc_setDefaultSpawnPosition(player->client_fd, 8, 80, 8);
   sc_startWaitingForChunks(player->client_fd);
   sc_setCenterChunk(player->client_fd, _x, _z);
@@ -354,17 +362,25 @@ void spawnPlayer (ServerContext *ctx, PlayerData *player) {
   task_yield(); // Check task timer between packets
 
   // Send spawn chunk first
+  printf("[spawn] send spawn chunk (%d,%d)\n", _x, _z);
   sc_chunkDataAndUpdateLight(ctx, player->client_fd, _x, _z);
   for (int i = -VIEW_DISTANCE; i <= VIEW_DISTANCE; i ++) {
     for (int j = -VIEW_DISTANCE; j <= VIEW_DISTANCE; j ++) {
       if (i == 0 && j == 0) continue;
-  sc_chunkDataAndUpdateLight(ctx, player->client_fd, _x + i, _z + j);
+      if ((i == -VIEW_DISTANCE || i == VIEW_DISTANCE || j == -VIEW_DISTANCE || j == VIEW_DISTANCE)) {
+        // Log only the border ring to reduce noise
+        printf("[spawn] send chunk (%d,%d)\n", _x + i, _z + j);
+      }
+      sc_chunkDataAndUpdateLight(ctx, player->client_fd, _x + i, _z + j);
     }
   }
   // Re-teleport player after all chunks have been sent
+  printf("[spawn] sync pos 2\n");
   sc_synchronizePlayerPosition(player->client_fd, spawn_x, spawn_y, spawn_z, spawn_yaw, spawn_pitch);
 
   task_yield(); // Check task timer between packets
+
+  printf("[spawn] end for fd=%d\n", player->client_fd);
 
 }
 
@@ -408,8 +424,10 @@ void broadcastPlayerMetadata (ServerContext *ctx, PlayerData *player) {
 // Sends a mob's entity metadata to the given player.
 // If client_fd is -1, broadcasts to all players.
 void broadcastMobMetadata (ServerContext *ctx, int client_fd, int entity_id) {
-
-  MobData *mob = &ctx->mob_data[-entity_id - 2];
+  if (entity_id >= -2) return; // must be <= -2 for mobs
+  int idx = -entity_id - 2;
+  if (idx < 0 || idx >= MAX_MOBS) return;
+  MobData *mob = &ctx->mob_data[idx];
   EntityData metadata[1];
   size_t length = 0;
 
@@ -448,7 +466,9 @@ void interactEntity (ServerContext *ctx, int entity_id, int interactor_id) {
 
   // This function only handles mobs
   if (entity_id >= 0) return;
-  MobData *mob = &ctx->mob_data[-entity_id - 2];
+  int idx = -entity_id - 2;
+  if (idx < 0 || idx >= MAX_MOBS) return;
+  MobData *mob = &ctx->mob_data[idx];
 
   switch (mob->type) {
     case 106: { // Sheep

@@ -96,12 +96,17 @@ pub fn handlePacket(ctx: *c.ServerContext, client_fd: c_int, length: c_int, pack
                 std.log.info("Received Client's Known Packs", .{});
                 std.log.info("  Finishing configuration", .{});
                 _ = c.sc_finishConfiguration(client_fd);
+                std.log.info("  Switching to PLAY state", .{});
                 c.setClientState(ctx, client_fd, c.STATE_PLAY);
+                std.log.info("  Sending login play", .{});
                 _ = c.sc_loginPlay(client_fd);
+                std.log.info("  Sending commands", .{});
                 _ = c.sc_commands(client_fd);
                 var player_ptr: ?*c.PlayerData = null;
+                std.log.info("  Fetching player data", .{});
                 if (c.getPlayerData(ctx, client_fd, &player_ptr) == 0) {
                     if (player_ptr) |player| {
+                        std.log.info("  Spawning player and entities", .{});
                         c.spawnPlayer(ctx, player);
                         for (0..c.MAX_PLAYERS) |i| {
                             const other_player = ctx.player_data[i];
@@ -130,6 +135,7 @@ pub fn handlePacket(ctx: *c.ServerContext, client_fd: c_int, length: c_int, pack
                             );
                             c.broadcastMobMetadata(ctx, client_fd, -2 - mob_idx);
                         }
+                        std.log.info("  Calling handlePlayerJoin", .{});
                         c.handlePlayerJoin(ctx, player);
                     }
                 }

@@ -34,7 +34,7 @@ const MAX_PLAYERS = c.MAX_PLAYERS;
 const PORT: u16 = @intCast(c.PORT);
 const TIME_BETWEEN_TICKS: i64 = @intCast(c.TIME_BETWEEN_TICKS);
 
-pub const client_streams = &connections.client_streams;
+pub const clients = &connections.clients;
 var g_state: state_mod.ServerState = undefined;
 
 const is_esp = @import("builtin").target.os.tag == .freestanding;
@@ -91,9 +91,9 @@ pub fn main() !void {
         idxmap[count] = -1;
         count += 1;
 
-        for (client_streams.*, 0..) |maybe_stream, i| {
-            if (maybe_stream) |stream| {
-                pfds[count] = .{ .fd = stream.handle, .events = posix.POLL.IN, .revents = 0 };
+        for (clients.*, 0..) |maybe_client, i| {
+            if (maybe_client) |client| {
+                pfds[count] = .{ .fd = client.stream.handle, .events = posix.POLL.IN, .revents = 0 };
                 idxmap[count] = @intCast(i);
                 count += 1;
             }
@@ -124,8 +124,8 @@ pub fn main() !void {
                 continue;
             }
             if (ev & posix.POLL.IN != 0) {
-                if (client_streams.*[idx]) |stream| {
-                    processClientPacket(stream);
+                if (clients.*[idx]) |client| {
+                    processClientPacket(client);
                 }
             }
         }
@@ -140,8 +140,8 @@ pub fn main() !void {
 
 fn acceptNewConnection(server: *net.Server) !void {
     var free_slot: ?usize = null;
-    for (client_streams.*, 0..) |maybe_stream, i| {
-        if (maybe_stream == null) {
+    for (clients.*, 0..) |maybe_client, i| {
+        if (maybe_client == null) {
             free_slot = i;
             break;
         }
@@ -163,13 +163,12 @@ fn acceptNewConnection(server: *net.Server) !void {
             const nb_mask: c_int = 1 << @bitOffsetOf(posix.O, "NONBLOCK");
             _ = try posix.fcntl(conn.stream.handle, posix.F.SETFL, cur | nb_mask);
         }
-        client_streams.*[i] = conn.stream;
         const fd_ci: c_int = if (comptime builtin.target.os.tag == .windows)
             @intCast(@intFromPtr(conn.stream.handle))
         else
             @intCast(conn.stream.handle);
+        clients.*[i] = .{ .stream = conn.stream, .id = fd_ci };
         std.log.info("Accepted new client in slot {d} (fd: {d})", .{ i, fd_ci });
-        if (comptime builtin.target.os.tag == .windows) connections.client_ids[i] = fd_ci;
         c.setClientState(@ptrCast(&g_state.context), fd_ci, c.STATE_NONE);
     } else {
         conn.stream.close();
@@ -177,44 +176,28 @@ fn acceptNewConnection(server: *net.Server) !void {
 }
 
 fn disconnectClient(slot: usize) void {
-    if (client_streams.*[slot]) |*stream| {
-        const fd_ci: c_int = if (comptime builtin.target.os.tag == .windows)
-            @intCast(@intFromPtr(stream.handle))
-        else
-            @intCast(stream.handle);
+    if (clients.*[slot]) |*client| {
+        const fd_ci: c_int = client.id;
         std.log.info("Client in slot {d} (fd: {d}) disconnected.", .{ slot, fd_ci });
         c.setClientState(@ptrCast(&g_state.context), fd_ci, c.STATE_NONE);
         c.handlePlayerDisconnect(@ptrCast(&g_state.context), fd_ci);
-        stream.close();
-        client_streams.*[slot] = null;
-        if (comptime builtin.target.os.tag == .windows) connections.client_ids[slot] = 0;
+        client.stream.close();
+        clients.*[slot] = null;
         if (g_state.context.client_count > 0) g_state.context.client_count -= 1;
     }
 }
 
-fn processClientPacket(stream: net.Stream) void {
-    const fd: c_int = if (comptime builtin.target.os.tag == .windows)
-        @intCast(@intFromPtr(stream.handle))
-    else
-        @intCast(stream.handle);
+fn processClientPacket(client: connections.Client) void {
+    const fd: c_int = client.id;
     const length = c.readVarInt(@ptrCast(&g_state.context), fd);
-    if (length == c.VARNUM_ERROR) return;
+    if (length == -1) return;
     if (length < 0 or @as(u32, @bitCast(length)) > g_state.context.recv_buffer.len) {
         std.log.warn("Bad packet length {d} from fd {d}; disconnecting.", .{ length, fd });
-        if (comptime builtin.target.os.tag == .windows) {
-            for (connections.client_ids, 0..) |cid, i| {
-                if (cid == fd) {
-                    disconnectClient(i);
-                    break;
-                }
-            }
-        } else {
-            if (connections.findSlotByFd(@intCast(fd))) |slot| disconnectClient(slot);
-        }
+        if (connections.findSlotByFd(fd)) |slot| disconnectClient(slot);
         return;
     }
     const packet_id = c.readVarInt(@ptrCast(&g_state.context), fd);
-    if (packet_id == c.VARNUM_ERROR) return;
+    if (packet_id == -1) return;
     const st = c.getClientState(@ptrCast(&g_state.context), fd);
     const pid_bits: u32 = @as(u32, @bitCast(packet_id));
     const header_size: c_int = c.sizeVarInt(pid_bits);

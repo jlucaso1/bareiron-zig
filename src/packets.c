@@ -335,6 +335,7 @@ int sc_chunkDataAndUpdateLight (ServerContext *ctx, int client_fd, int _x, int _
   const int chunk_data_size = (4101 + sizeVarInt(256) + sizeof(network_block_palette)) * 20 + 6 * 12;
   const int light_data_size = 14 + (sizeVarInt(2048) + 2048) * 26;
 
+  printf("[chunks] begin (%d,%d) for fd=%d\n", _x, _z, client_fd);
   writeVarInt(client_fd, 11 + sizeVarInt(chunk_data_size) + chunk_data_size + light_data_size);
   writeByte(client_fd, 0x27);
 
@@ -367,7 +368,9 @@ int sc_chunkDataAndUpdateLight (ServerContext *ctx, int client_fd, int _x, int _
     // block palette as varint buffer
     send_all(client_fd, network_block_palette, sizeof(network_block_palette));
     // chunk section buffer
-  uint8_t biome = buildChunkSection(ctx, x, y, z);
+    uint8_t biome = buildChunkSection(ctx, x, y, z);
+    // sanity: chunk_section is 4096 bytes
+    // send it and progress log
     send_all(client_fd, chunk_section, 4096);
     // biome data
     writeByte(client_fd, 0); // bits per entry
@@ -426,6 +429,7 @@ int sc_chunkDataAndUpdateLight (ServerContext *ctx, int client_fd, int _x, int _
     sc_blockUpdate(client_fd, ctx->block_changes[i].x, ctx->block_changes[i].y, ctx->block_changes[i].z, ctx->block_changes[i].block);
   }
 
+  printf("[chunks] end (%d,%d) for fd=%d\n", _x, _z, client_fd);
   return 0;
 
 }
@@ -896,8 +900,9 @@ int cs_closeContainer (ServerContext *ctx, int client_fd) {
 
 // S->C Player Info Update, "Add Player" action
 int sc_playerInfoUpdateAddPlayer (int client_fd, PlayerData player) {
-
-  writeVarInt(client_fd, 21 + strlen(player.name)); // Packet length
+  int name_len = 0;
+  while (name_len < 16 && player.name[name_len] != '\0') name_len++;
+  writeVarInt(client_fd, 21 + name_len); // Packet length
   writeByte(client_fd, 0x3F); // Packet ID
 
   writeByte(client_fd, 0x01); // EnumSet: Add Player
@@ -906,8 +911,8 @@ int sc_playerInfoUpdateAddPlayer (int client_fd, PlayerData player) {
   // Player UUID
   send_all(client_fd, player.uuid, 16);
   // Player name
-  writeByte(client_fd, strlen(player.name));
-  send_all(client_fd, player.name, strlen(player.name));
+  writeByte(client_fd, name_len);
+  send_all(client_fd, player.name, name_len);
   // Properties (don't send any)
   writeByte(client_fd, 0);
 
@@ -977,7 +982,7 @@ int sc_spawnEntityPlayer (int client_fd, PlayerData player) {
     player.client_fd, player.uuid, 149,
     player.x > 0 ? (double)player.x + 0.5 : (double)player.x - 0.5,
     player.y,
-    player.z > 0 ? (double)player.z + 0.5 : (float)player.z - 0.5,
+    player.z > 0 ? (double)player.z + 0.5 : (double)player.z - 0.5,
     player.yaw, player.pitch
   );
 }

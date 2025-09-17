@@ -41,17 +41,17 @@ pub export fn get_program_time() i64 {
 }
 fn getStream(client_fd: c_int) !*net.Stream {
     if (comptime builtin.target.os.tag == .windows) {
-        for (&connections.client_streams, 0..) |*maybe_stream, i| {
-            if (maybe_stream.*) |*stream| {
-                if (connections.client_ids[i] == client_fd) return stream;
+        for (&connections.clients) |*maybe_client| {
+            if (maybe_client.*) |*client| {
+                if (client.id == client_fd) return &client.stream;
             }
         }
         return error.StreamNotFound;
     } else {
         const fd_val: std.posix.fd_t = @intCast(client_fd);
-        for (&connections.client_streams) |*maybe_stream| {
-            if (maybe_stream.*) |*stream| {
-                if (stream.handle == fd_val) return stream;
+        for (&connections.clients) |*maybe_client| {
+            if (maybe_client.*) |*client| {
+                if (client.stream.handle == fd_val) return &client.stream;
             }
         }
         return error.StreamNotFound;
