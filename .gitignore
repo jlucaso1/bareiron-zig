@@ -7,3 +7,4 @@ include/registries.h
 *.bin
 .zig-cache
 zig-out
+/*.xml

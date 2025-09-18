@@ -4,6 +4,15 @@ comptime {
     _ = @import("varnum.zig");
 }
 comptime {
+    _ = @import("dispatch_play_inventory.zig");
+}
+comptime {
+    _ = @import("dispatch_play_chat.zig");
+}
+comptime {
+    _ = @import("dispatch_play_system.zig");
+}
+comptime {
     _ = @import("structures.zig");
 }
 comptime {
